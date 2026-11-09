@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lightning Gifts</title>
+  <style>
+    :root {
+      --accent: #ff8000;
+      --ink: #1d1b16;
+      --muted: #6b675e;
+      --paper: #fffaf2;
+      --line: #e8ddd0;
+      --warn: #a33c14;
+      --ok: #106b2c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      width: 360px;
+      margin: 0;
+      padding: 14px;
+      background: var(--paper);
+      color: var(--ink);
+      font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    header img { width: 24px; height: 24px; border-radius: 6px; }
+    header h1 { font-size: 14px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+    header .kit { margin-left: auto; font-size: 11px; color: var(--muted); text-decoration: none; }
+    header .kit:hover { color: var(--accent); }
+    label { display: block; font-size: 11px; font-weight: 600; color: var(--muted); margin: 10px 0 3px; }
+    input, textarea, select {
+      width: 100%;
+      padding: 7px 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font: inherit;
+      background: #fff;
+      color: var(--ink);
+    }
+    textarea { resize: none; min-height: 42px; }
+    .row { display: flex; gap: 8px; }
+    .row > * { flex: 1; }
+    button {
+      width: 100%;
+      margin-top: 12px;
+      padding: 9px 10px;
+      border: 0;
+      border-radius: 9px;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.55; cursor: default; }
+    button.ghost {
+      background: #fff;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      font-weight: 600;
+      width: auto;
+      padding: 5px 10px;
+      margin: 0;
+    }
+    .fee { font-size: 11px; color: var(--muted); margin-top: 3px; }
+    .status { margin-top: 10px; font-size: 12px; }
+    .status .st { font-weight: 700; }
+    .box {
+      margin-top: 10px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      font-size: 12px;
+      word-break: break-all;
+    }
+    .box .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 700; }
+    .box .actions { display: flex; gap: 6px; margin-top: 6px; justify-content: flex-end; }
+    .err { color: var(--warn); font-size: 12px; margin-top: 8px; white-space: pre-wrap; }
+    .ok-note { color: var(--ok); font-size: 12px; margin-top: 6px; }
+    .hint { color: var(--muted); font-size: 11px; margin-top: 8px; }
+    .hidden { display: none; }
+    a { color: var(--accent); }
+    .copied { color: var(--ok); font-size: 11px; }
+    footer { margin-top: 12px; font-size: 10px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="icons/icon32.png" alt="" />
+    <h1>Lightning Gifts</h1>
+    <a class="kit" href="https://lightning.gifts" target="_blank" rel="noreferrer">lightning.gifts ↗</a>
+  </header>
+
+  <!-- first run: no API key yet -->
+  <section id="setup" class="hidden">
+    <p><strong>Connect your account</strong></p>
+    <p>This extension works with a personal <strong>API key</strong> from your Lightning Gifts account.</p>
+    <ol style="padding-left: 18px; font-size: 12px;">
+      <li>Sign in at <a href="https://lightning.gifts/signin" target="_blank" rel="noreferrer">lightning.gifts</a>.</li>
+      <li>Open <strong>Profile → Developer API Keys</strong>.</li>
+      <li><strong>Create API key</strong> and paste it below. Treat it like a password — it acts as your account with no scopes and no expiry, and you can revoke it any time from the same panel.</li>
+    </ol>
+    <label for="key">API key</label>
+    <input id="key" type="password" placeholder="paste your key" autocomplete="off" />
+    <button id="save-key">Save key</button>
+    <p class="hint">Lightning Gifts is not a wallet, an exchange, or a bank: gift sats sit with the service only between funding and the recipient's withdrawal. The key travels only to lightning.gifts, in an Authorization header — never in a URL, a log, or a share sheet.</p>
+  </section>
+
+  <!-- has key: create -->
+  <section id="create" class="hidden">
+    <label for="amount">Gift amount (sats)</label>
+    <input id="amount" type="number" min="1" step="1" placeholder="1000" />
+    <div class="fee" id="fee-line">Fee ≈ 100 sats on small gifts; total invoiced = amount + fee.</div>
+
+    <div class="row">
+      <div>
+        <label for="expiry">Gift expiry</label>
+        <select id="expiry">
+          <option value="7">7 days</option>
+          <option value="30" selected>30 days</option>
+          <option value="60">60 days</option>
+          <option value="90">90 days (max)</option>
+        </select>
+      </div>
+      <div>
+        <label for="flow">Recipient</label>
+        <select id="flow">
+          <option value="SKIP" selected>Claim link only</option>
+          <option value="DEFAULT">Sign-in claim</option>
+        </select>
+      </div>
+    </div>
+
+    <label for="note">Note to the recipient (optional)</label>
+    <textarea id="note" maxlength="280" placeholder="Happy birthday! Spend it well 🧡"></textarea>
+
+    <button id="create">Create gift</button>
+    <div class="status hidden" id="status"></div>
+    <div class="err hidden" id="err"></div>
+
+    <div class="box hidden" id="invoice-box">
+      <div class="lbl">1 · Pay the funding invoice — exactly its amount, from your own wallet</div>
+      <div id="invoice" style="margin-top:4px;"></div>
+      <div class="actions"><button class="ghost" id="copy-invoice">Copy invoice</button></div>
+      <div class="copied hidden" id="copied-invoice">copied ✓</div>
+    </div>
+
+    <div class="box hidden" id="link-box">
+      <div class="lbl" id="claim-lbl">2 · One-time claim link</div>
+      <div id="claim" style="margin-top:4px;"></div>
+      <div class="actions"><button class="ghost" id="copy-link">Copy link</button></div>
+      <div class="copied hidden" id="copied-link">copied ✓ &nbsp;·&nbsp; this link is single-use — do not reshare the spent one</div>
+    </div>
+
+    <p class="hint">The link <strong>is</strong> the gift: single-use and time-limited. Send it over a channel you trust with the recipient, and never paste it into public pages.</p>
+    <footer>Operator-published · data goes only to lightning.gifts · <a href="https://lightning.gifts/privacy" target="_blank" rel="noreferrer">privacy</a></footer>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>

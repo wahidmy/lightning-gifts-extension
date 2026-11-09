@@ -1,0 +1,3 @@
+dist/*.zip
+shots/
+node_modules/
