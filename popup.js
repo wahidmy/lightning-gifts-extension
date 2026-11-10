@@ -60,21 +60,33 @@ $("amount").addEventListener("input", (e) => {
   if (fee) $("fee-line").textContent = `Fee ≈ ${fee} sats · total invoiced ≈ ${Number(e.target.value) + fee} sats`;
 });
 
-async function api(method, path, body) {
+async function api(method, path, body, timeoutMs = 15_000) {
   const { key } = await storage.get(["key"]);
-  const res = await fetch(APP + path, {
-    method,
-    headers: {
-      "Authorization": `Bearer ${key}`,
-      "Content-Type": "application/json",
-      "User-Agent": UA,
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await res.text();
-  let json = null;
-  try { json = JSON.parse(text); } catch { /* text-only statuses */ }
-  return { status: res.status, json, text };
+  // abort-guard: an unfed response must NEVER strand the UI at a status line
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetch(APP + path, {
+      method,
+      headers: {
+        "Authorization": `Bearer ${key}`,
+        "Content-Type": "application/json",
+        "User-Agent": UA,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: ctl.signal,
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* text-only statuses */ }
+    return { status: res.status, json, text };
+  } catch (err) {
+    // abort/network error normalised: callers branch on status (0 = no response)
+    // — no promise escapes this layer, so no UI can be stranded on a dead await.
+    return { status: 0, json: null, text: String(err && err.message ? err.message : err) };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function copy(text, done) {
@@ -154,10 +166,16 @@ function watchGift(id) {
 async function mintFor(id) {
   const g = (await getGifts())[id];
   if (g?.claimUrl) return g.claimUrl;
-  const mint = await api("POST", `/api/gifts/${id}/claimToken`, {});
-  if (mint.status === 200 && mint.json?.claimUrl) {
-    await upsertGift(id, { claimUrl: mint.json.claimUrl, mintedAt: new Date().toISOString() });
-    return mint.json.claimUrl;
+  try {
+    const mint = await api("POST", `/api/gifts/${id}/claimToken`, {});
+    if (mint.status === 200 && mint.json?.claimUrl) {
+      await upsertGift(id, { claimUrl: mint.json.claimUrl, mintedAt: new Date().toISOString() });
+      return mint.json.claimUrl;
+    }
+  } catch {
+    // abort/network error: null -> the caller's message + the idempotent retry on
+    // the next popup open carry the recovery; the token may already be minted
+    // server-side, and re-minting is the safe path in that world too.
   }
   return null;
 }
@@ -333,8 +351,10 @@ $("create").addEventListener("click", async () => {
     if (status === "UNSEEN") {
       clearInterval(poll);
       setStatus("Funded — ", bold("minting your one-time claim link…"));
-      $("create").disabled = false;
+      // the button STAYS disabled through the mint window: a "Create gift" click
+      // here creates the exact duplicate-gift confusion (v1.0.2 incident report)
       const url = await mintFor(gift.id);
+      $("create").disabled = false;
       if (url) {
         $("claim").textContent = url;
         show("claim-box");
