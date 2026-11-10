@@ -30,7 +30,22 @@ if (IS_DOC_RENDER) {
 
 const show = (id, on = true) => $(id).classList.toggle("hidden", !on);
 const setErr = (msg) => { $("err").textContent = msg || ""; show("err", !!msg); };
-const setStatus = (html) => { $("status").innerHTML = html; show("status", !!html); };
+// DOM-built, not innerHTML: parts are plain strings or {b:"bold text"}.
+// (AMO linter rule: dynamic innerHTML = unsupported sanitized-value warning.)
+const bold = (t) => ({ b: t });
+const setStatus = (...parts) => {
+  const holder = $("status");
+  holder.replaceChildren(...parts.map((p) => {
+    if (p && p.b) {
+      const el = document.createElement("span");
+      el.className = "st";
+      el.textContent = p.b;
+      return el;
+    }
+    return document.createTextNode(p === undefined || p === null ? "" : String(p));
+  }));
+  show("status", true);
+};
 
 // --- fee preview (mirrors the service's own math: 1% with a 100-sat floor) ---
 function feeFor(amount) {
@@ -113,7 +128,7 @@ $("create").addEventListener("click", async () => {
   if (note) body.note = note;
 
   $("create").disabled = true;
-  setStatus("<span class='st'>Creating…</span>");
+  setStatus(bold("Creating…"));
 
   const created = await api("POST", "/api/gifts", body);
   if (created.status !== 200 || !created.json || !created.json.id) {
@@ -127,7 +142,9 @@ $("create").addEventListener("click", async () => {
   const gift = created.json;
   $("invoice").textContent = gift.invoice;
   show("invoice-box");
-  setStatus(`Gift <span class="st">${gift.id.slice(0, 8)}…</span> created for <span class="st">${gift.amount} sats</span> (total ${totalStr(gift)}) — <span class="st">waiting for your payment</span>`);
+  setStatus("Gift ", bold(gift.id.slice(0, 8) + "…"), " created for ",
+    bold(gift.amount + " sats"), " (total ", bold(gift.amount + gift.fee + " sats"),
+    ") — ", bold("waiting for your payment"));
   $("copy-invoice").onclick = () => copy(gift.invoice, "copied-invoice");
 
   // poll while the popup is open: UNFUNDED -> UNSEEN happens when LNbits settles
@@ -137,21 +154,23 @@ $("create").addEventListener("click", async () => {
     const status = g.json?.status;
     if (status === "UNSEEN") {
       clearInterval(poll);
-      setStatus(`Funded — <span class="st">minting your one-time claim link…</span>`);
+      setStatus("Funded — ", bold("minting your one-time claim link…"));
       const mint = await api("POST", `/api/gifts/${gift.id}/claimToken`, {});
       $("create").disabled = false;
       if (mint.status === 200 && mint.json?.claimUrl) {
         $("claim").textContent = mint.json.claimUrl;
         show("claim-box");
         $("copy-link").onclick = () => copy(mint.json.claimUrl, "copied-link");
-        setStatus(`Done — hand over the <span class="st">claim link</span> below.`);
+        setStatus("Done — hand over the ", bold("claim link"), " below.");
       } else {
-        setStatus(`Funded — but minting failed (HTTP ${mint.status}). Re-open the popup to mint again; the gift exists.`);
+        setStatus("Funded — but minting failed (HTTP ", String(mint.status),
+          "). Re-open the popup to mint again; the gift exists.");
       }
     } else if (status === "UNFUNDED" && Date.now() > deadline) {
       clearInterval(poll);
       $("create").disabled = false;
-      setStatus(`Still <span class="st">UNFUNDED</span> — the invoice isn't paid yet. Check your wallet, then re-open the popup and mint once you've paid it. <strong>Never pay the same invoice twice.</strong>`);
+      setStatus("Still ", bold("UNFUNDED"), " — the invoice isn't paid yet. Check your wallet, then re-open the popup and mint once you've paid it. ",
+        bold("Never pay the same invoice twice."));
     }
   }, 2000);
 });
