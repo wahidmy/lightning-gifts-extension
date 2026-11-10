@@ -79,6 +79,18 @@ def gate(zip_path):
     r = subprocess.run(["node", "--check", tpath], capture_output=True, text=True)
     check("popup.js parses (node --check)", r.returncode == 0, r.stderr.strip()[:80])
 
+    # id-reference cross-check: every id popup.js looks up must exist in popup.html
+    # (v1.0.0 class: duplicate id shadowing; v1.0.5 class: referenced id missing
+    # entirely -> null deref threw mid-render and silently killed the branch).
+    html_txt = raw["popup.html"].decode("utf-8")  # artifact = source of truth
+    html_ids = set(re.findall(r'id="([\w-]+)"', html_txt))
+    used = set(re.findall(r'\$\("([\w-]+)"\)', js))
+    used |= set(re.findall(r'show\("([\w-]+)"', js))
+    used |= set(re.findall(r'getElementById\("([\w-]+)"\)', js))
+    dynamic = {"claim-retry"}  # created at runtime by popup.js
+    missing = sorted(used - html_ids - dynamic)
+    check("popup.js id references all exist in popup.html", not missing, str(missing))
+
     # 5. addons-linter — 0 errors, 0 notices, 0 warnings EXCEPT the single documented
     # Firefox-side informational code: BACKGROUND_SERVICE_WORKER_IGNORED is inherent to
     # the cross-browser dual background manifest (Chromium reads service_worker; Firefox
@@ -197,6 +209,29 @@ def behavioral(zip_path, key):
             check("behavioral: no new gifts on control clicks", len(created) == before,
                   f"{before} -> {len(created)} ({created})")
             check("behavioral: invoice text stable", page.inner_text("#invoice") == inv_before)
+
+            # synthetic UNSEEN display: write a link-ready gift straight into storage and
+            # assert the popup renders it (this exercises the exact DOM path that broke
+            # in v1.0.5 — a wrong id threw mid-render so the link never displayed).
+            # The synthetic gift is newest (createdAt=now) so showCurrentGift picks it.
+            page.evaluate(
+                """() => chrome.storage.local.get(['gifts']).then(({gifts}) => {
+                     const next = Object.assign({}, gifts, {SYNTHETIC: {
+                       id: 'SYNTHETIC', amount: 100, fee: 100, invoice: 'synthetic',
+                       createdAt: new Date().toISOString(), status: 'UNSEEN',
+                       claimUrl: 'https://lightning.gifts/tips/SYNTHETIC/claim?ct=gate'
+                     }});
+                     return chrome.storage.local.set({gifts: next});
+                   })""")
+            page.wait_for_timeout(2500)
+            link_shown = page.evaluate(
+                """() => { const box = document.getElementById('link-box');
+                          const claim = document.getElementById('claim');
+                          return { visible: !!box && !box.classList.contains('hidden'),
+                                   text: claim ? claim.textContent : null }; }""")
+            check("behavioral: UNSEEN gift renders its claim link (#link-box visible + text)",
+                  link_shown.get("visible") and (link_shown.get("text") or "").startswith("https://lightning.gifts/tips/SYNTHETIC/claim"),
+                  str(link_shown))
             ctx.close()
     finally:
         for gid in created:
