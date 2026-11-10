@@ -350,20 +350,58 @@ $("create").addEventListener("click", async () => {
     const status = g.json?.status;
     if (status === "UNSEEN") {
       clearInterval(poll);
-      setStatus("Funded — ", bold("minting your one-time claim link…"));
-      // the button STAYS disabled through the mint window: a "Create gift" click
-      // here creates the exact duplicate-gift confusion (v1.0.2 incident report)
+      // Edge can freeze popup pages when they appear idle: the fetch resolution
+      // then never renders. So the mint attempt runs under a VISIBLE 15s countdown,
+      // and its result is ALSO written to storage + rendered in the Earlier-gifts
+      // row, guaranteeing a recoverable result no later than the 15s guard
+      // (v1.0.4: the 88-sat "stuck 45s+" report).
+      let secs = 15;
+      const tick = setInterval(() => {
+        setStatus("Funded — ", bold(`minting your one-time claim link… ${Math.max(secs, 0)}s`));
+        if (secs-- <= 0) clearInterval(tick);
+      }, 1000);
       const url = await mintFor(gift.id);
-      $("create").disabled = false;
+      clearInterval(tick);
       if (url) {
         $("claim").textContent = url;
         show("claim-box");
         $("copy-link").onclick = () => copy(url, "copied-link");
         setStatus("Done — hand over the ", bold("claim link"), " below.");
       } else {
-        setStatus("Funded — but the mint didn't come back. ", bold("Re-open the popup"),
-          " — it will finish automatically; the gift keeps its funds.");
+        // 15s came and went (or an error folded to 0): the server may ALREADY have
+        // minted. Show the persistent recoverable state instead of a spinner.
+        show("claim-box");
+        $("claim").textContent = "Your claim link couldn't be fetched right now — it is already on the server.";
+        setStatus("Paid — ", bold("result not shown yet. "), "Press ", bold("Retry mint"),
+          " below, or re-open the popup; the gift keeps its funds either way.");
       }
+      $("create").disabled = false;
+      const preRetry = document.getElementById("claim-retry");
+      if (preRetry) preRetry.parentElement?.remove(); // remove MY retry row, keep #copy-link
+      const retry = document.createElement("button");
+      retry.id = "claim-retry";
+      retry.className = "ghost small";
+      retry.textContent = url ? "Copy link again" : "Retry mint";
+      const doneHint = document.createElement("span");
+      doneHint.className = "copied hidden";
+      doneHint.textContent = "copied ✓";
+      retry.onclick = async () => {
+        if (url) { $("claim").textContent = url; $("copy-link").onclick = () => copy(url, "copied-link"); return copy(url, doneHint); }
+        retry.disabled = true; retry.textContent = "Minting…";
+        const again = await mintFor(gift.id);
+        retry.disabled = false;
+        if (again) {
+          retry.textContent = "Copy link again";
+          $("claim").textContent = again;
+          $("copy-link").onclick = () => copy(again, "copied-link");
+          return copy(again, doneHint);
+        }
+        retry.textContent = "Failed — retry";
+      };
+      const actions = document.createElement("div");
+      actions.className = "actions";
+      actions.append(retry, doneHint);
+      $("claim-box").append(actions);
       renderGifts(gift.id);
     } else if (status === "UNFUNDED" && Date.now() > deadline) {
       clearInterval(poll);
