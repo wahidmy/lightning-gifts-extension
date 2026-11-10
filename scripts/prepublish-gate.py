@@ -26,8 +26,8 @@ Exit 0 == every non-skipped gate passed.
 import collections, hashlib, json, os, re, subprocess, sys, tempfile, time, urllib.request, urllib.error
 
 APP = "https://lightning.gifts"
-EXPECTED_MEMBERS = {"manifest.json", "popup.html", "popup.js", "background.js", "LICENSE", "README.md",
-                    "icons/brand.png", "icons/icon16.png", "icons/icon32.png",
+EXPECTED_MEMBERS = {"manifest.json", "popup.html", "popup.js", "background.js", "LICENSE",
+                    "icons/icon16.png", "icons/icon32.png",
                     "icons/icon48.png", "icons/icon128.png"}
 fails, skipped = [], []
 
