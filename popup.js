@@ -1,12 +1,18 @@
 // Lightning Gifts — popup logic. Plain MV3 extension code: no frameworks, no remote code,
 // one remote host (https://lightning.gifts), one credential (the user's own API key, stored locally).
+//
+// v1.0.5 ARCHITECTURE: the popup is a VIEWER. A browser-action popup dies the moment it
+// loses focus — which is exactly when the user switches to their wallet to pay — so popup
+// death cannot own a payment watch. The service worker (background.js) + chrome.alarms
+// drive all GET/mint network work and write results into the same "gifts" storage map;
+// the popup re-renders that map. This ends the entire "stuck at waiting/minting" class
+// (reports: 133-sat, 88-sat, 77-sat gifts, 2026-11-10).
 const APP = "https://lightning.gifts";
 const UA = "lightning-gifts-extension/1.0 (chrome)";
 
 const $ = (id) => document.getElementById(id);
-// popup.html runs in the extension context (chrome.storage) — but ALSO loads fine as a plain
-// file:// page for screenshots/documentation, where a tiny in-memory shim keeps it usable.
-// ?__demo=1 pre-seeds a dummy key so docs shots can show the form without touching any account.
+// popup.html also loads as a plain file:// page for screenshots/docs (?__demo=1),
+// where a tiny in-memory shim keeps the UI usable without chrome APIs.
 const IS_DOC_RENDER = !chrome?.storage?.local &&
   new URLSearchParams(location.search).get("__demo") === "1";
 window.__demoKey = IS_DOC_RENDER;
@@ -60,11 +66,11 @@ $("amount").addEventListener("input", (e) => {
   if (fee) $("fee-line").textContent = `Fee ≈ ${fee} sats · total invoiced ≈ ${Number(e.target.value) + fee} sats`;
 });
 
-async function api(method, path, body, timeoutMs = 15_000) {
+async function api(method, path, body) {
   const { key } = await storage.get(["key"]);
   // abort-guard: an unfed response must NEVER strand the UI at a status line
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  const timer = setTimeout(() => ctl.abort(), 15_000);
   try {
     const res = await fetch(APP + path, {
       method,
@@ -98,12 +104,7 @@ async function copy(text, done) {
 }
 
 // ---------------------------------------------------------------------------
-// session gifts — every gift this popup created, persisted so a payment or a
-// claim-link mint is never lost to a popup close or a second create.
-// v1.0.0/1.0.1 stored NOTHING: closing the popup mid-mint stranded the user at
-// "Funded — minting…" forever even though the service had minted the claim token
-// (incident 2026-11-10: the 133-sat gift). Store everything; heal on boot.
-// One key ("gifts") holds the whole map — works with both storage backends above.
+// session gifts — persisted, shared with the service worker via the "gifts" map
 // ---------------------------------------------------------------------------
 const GIFT_TTL_MS = 7 * 864e5; // prune session records after a week
 
@@ -131,38 +132,6 @@ const STATUS_CHIP = {
   DELETED: "deleted",
 };
 
-// per-gift pollers: every UNFUNDED session gift is watched in parallel (2s), so
-// create-A -> pay-A -> create-B never orphans A's status. Each gift polls at most
-// 45 reads (~90s) — matches the service's "one LNbits read per second per open
-// UNFUNDED gift page is fine at this scale" cost rationale.
-const pollers = new Map();
-
-function watchGift(id) {
-  if (pollers.has(id)) return;
-  const started = Date.now();
-  const t = setInterval(async () => {
-    if (Date.now() - started > 90_000) {
-      clearInterval(t); pollers.delete(id);
-      renderGifts();
-      return;
-    }
-    const g = await api("GET", `/api/gifts/${id}`);
-    const status = g.json?.status;
-    if (!status) return;
-    const prev = (await getGifts())[id];
-    if (prev && prev.status === status) return;
-    await upsertGift(id, { status });
-    if (status === "UNSEEN") {
-      clearInterval(t); pollers.delete(id);
-      await mintFor(id);
-    } else if (status !== "UNFUNDED") {
-      clearInterval(t); pollers.delete(id);
-    }
-    renderGifts();
-  }, 2000);
-  pollers.set(id, t);
-}
-
 async function mintFor(id) {
   const g = (await getGifts())[id];
   if (g?.claimUrl) return g.claimUrl;
@@ -173,9 +142,8 @@ async function mintFor(id) {
       return mint.json.claimUrl;
     }
   } catch {
-    // abort/network error: null -> the caller's message + the idempotent retry on
-    // the next popup open carry the recovery; the token may already be minted
-    // server-side, and re-minting is the safe path in that world too.
+    // api() never rejects since v1.0.3 (abort-guard folds to status 0); this catch is a
+    // belt for anything storage unexpectedly throws. Recovery: the SW retries per alarm.
   }
   return null;
 }
@@ -221,19 +189,8 @@ function giftRow(g, isCurrent) {
       body.append(link, btn, done);
     } else {
       const note = document.createElement("span");
-      note.textContent = "paid — minting next time you open this popup, or now:";
+      note.textContent = "paid — the service worker is minting your link";
       body.append(note);
-      const retry = document.createElement("button");
-      retry.className = "ghost small";
-      retry.textContent = "Mint link now";
-      retry.onclick = async () => {
-        retry.disabled = true;
-        const url = await mintFor(g.id);
-        retry.textContent = url ? "minted ✓" : "failed — reopen later";
-        retry.disabled = false;
-        renderGifts();
-      };
-      body.append(retry);
     }
   } else if (g.status === "UNFUNDED") {
     const note = document.createElement("span");
@@ -257,17 +214,115 @@ async function renderGifts(currentId) {
   show("gifts-section", others.length > 0);
 }
 
+async function currentGift() {
+  const entries = Object.values(await getGifts())
+    .filter((g) => g.id && g.status)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  return entries[0] ?? null;
+}
+
 // --- setup vs create screen ---
+let currentShownId = null;
+async function showCurrentGift() {
+  const g = await currentGift();
+  if (!g) { show("invoice-box", false); return; }
+  if (g.id !== currentShownId) {
+    currentShownId = g.id;
+    currentShownClearButtons();
+    $("invoice").textContent = g.invoice ?? "";
+    $("copy-invoice").onclick = () => copy(g.invoice ?? "", "copied-invoice");
+  }
+  if (g.status === "UNSEEN" && g.claimUrl) {
+    $("claim").textContent = g.claimUrl;
+    $("copy-link").onclick = () => copy(g.claimUrl, "copied-link");
+    show("claim-box");
+    setStatus("Done — hand over the ", bold("claim link"), " below.");
+    $("create").disabled = false;
+  } else if (g.status === "UNSEEN") {
+    setStatus("Paid — ", bold("the service worker is minting your link"), "; it appears here (and as a notification) within a minute.");
+    $("create").disabled = false;
+  } else if (g.status === "UNFUNDED") {
+    // the one state where the button re-arms by DESIGN: the user may want another gift
+    // while the first sits unfunded (it stays listed in Earlier gifts, and the SW keeps
+    // watching it) — with an explicit "Check payment now" rescue button.
+    $("create").disabled = false;
+    setStatus("Gift ", bold((g.id || "").slice(0, 8) + "…"), " still ", bold("UNFUNDED"),
+      " — the background watcher checks every 30s; press ", bold("Check payment now"),
+      " after you've paid. ", bold("Never pay the same invoice twice."));
+    ensureCheckPaymentButton(g.id);
+  }
+  await renderGifts(g.id);
+}
+
+// removes MY dynamic buttons but never #copy-link / #copy-invoice
+function currentShownClearButtons() {
+  for (const id of ["claim-retry"]) {
+    const el = document.getElementById(id);
+    if (el) el.parentElement?.remove();
+  }
+}
+
+// explicit user-gesture rescue: checks the flip and mints on the spot
+function ensureCheckPaymentButton(giftId) {
+  const box = $("claim-box");
+  if (document.getElementById("claim-retry")) return;
+  show("claim-box");
+  $("claim").textContent = "Not paid yet — after you've paid, press Check payment now.";
+  $("copy-link").onclick = () => copy($("claim").textContent, "copied-link");
+  const retry = document.createElement("button");
+  retry.id = "claim-retry";
+  retry.className = "ghost small";
+  retry.textContent = "Check payment now";
+  const doneHint = document.createElement("span");
+  doneHint.className = "copied hidden";
+  doneHint.textContent = "copied ✓";
+  retry.onclick = async () => {
+    retry.disabled = true; retry.textContent = "Checking…";
+    const fresh = await api("GET", `/api/gifts/${giftId}`);
+    const status = fresh.json?.status;
+    if (status === "UNSEEN") await upsertGift(giftId, { status });
+    retry.disabled = false;
+    if (status === "UNSEEN") {
+      const url = await mintFor(giftId);
+      if (url) {
+        $("claim").textContent = url;
+        $("copy-link").onclick = () => copy(url, "copied-link");
+        retry.textContent = "Copy link again";
+        return copy(url, doneHint);
+      }
+      retry.textContent = "Minting ran on the background — reopen to see the link";
+      return;
+    }
+    retry.textContent = "Not paid yet — checking every 30s in the background";
+  };
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  actions.append(retry, doneHint);
+  box.append(actions);
+}
+
 async function boot() {
   const { key } = await storage.get(["key"]);
   if (!key) { show("setup"); show("create-screen", false); return; }
   show("setup", false); show("create-screen");
-  await renderGifts();
+  // the alarm may have been cleared by the SW (nothing to watch): re-arm cheaply.
+  try { chrome.alarms.create("lgift-watch", { delayInMinutes: 0.5, periodInMinutes: 0.5 }); } catch { /* plain page */ }
+  // a heal for UNSEEN-without-link on open: one chance here, then the alarm carries it
   for (const g of Object.values(await getGifts())) {
-    if (g.status === "UNFUNDED") watchGift(g.id);
     if (g.status === "UNSEEN" && !g.claimUrl) await mintFor(g.id);
   }
-  await renderGifts();
+  await showCurrentGift();
+  // storage-driven render: the SW's writes arrive here even while an unfocused popup's
+  // timers are throttled to once-per-minute; the event is instant, the interval is the
+  // backup. An unfocused popup may still display stale content for seconds — clicking
+  // inside the popup (any click) forces an immediate refresh.
+  setInterval(showCurrentGift, 2000); // backup only
+  if (chrome?.storage?.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "local" && changes.gifts) showCurrentGift();
+    });
+  }
+  document.addEventListener("click", () => showCurrentGift());
 }
 
 $("save-key").addEventListener("click", async () => {
@@ -278,19 +333,23 @@ $("save-key").addEventListener("click", async () => {
   await boot();
 });
 
-// --- create -> fund -> mint ---
+// --- create (storage-first; the SW owns everything after the POST) ---
+let creating = false;
 $("create").addEventListener("click", async () => {
+  if (creating) return;
+  creating = true;
   setErr(""); show("invoice-box", false); show("link-box", false); show("status", false);
+  currentShownClearButtons();
 
   const amount = Math.floor(Number($("amount").value));
-  if (!Number.isFinite(amount) || amount <= 0) { setErr("enter a whole number of sats"); return; }
+  if (!Number.isFinite(amount) || amount <= 0) { setErr("enter a whole number of sats"); creating = false; return; }
 
   // preflight: is this deployment accepting money right now?
-  const cap = await fetch(APP + "/api/payments-capability", { headers: { "User-Agent": UA } })
-    .then((r) => r.json()).catch(() => null);
-  if (cap && cap.canReceive === false) {
-    setErr("Payments are paused on lightning.gifts right now (reason: " + (cap.reason || "unknown") +
+  const cap = await api("GET", "/api/payments-capability");
+  if (cap.json && cap.json.canReceive === false) {
+    setErr("Payments are paused on lightning.gifts right now (reason: " + (cap.json.reason || "unknown") +
       "). Ask the operator before funding a gift you can't pay.");
+    creating = false;
     return;
   }
 
@@ -311,9 +370,10 @@ $("create").addEventListener("click", async () => {
   setStatus(bold("Creating…"));
 
   const created = await api("POST", "/api/gifts", body);
+  creating = false;
   if (created.status !== 200 || !created.json || !created.json.id) {
     // surface the service's own validation sentences (ceiling, invoice cap, kill switches)
-    setErr(created.text?.slice(0, 300) || `Create failed (HTTP ${created.status})`);
+    setErr(created.json?.message || created.text?.slice(0, 300) || `Create failed (HTTP ${created.status})`);
     $("create").disabled = false;
     show("status", false);
     return;
@@ -334,83 +394,36 @@ $("create").addEventListener("click", async () => {
     status: "UNFUNDED",
     claimUrl: null,
   });
-  await renderGifts(gift.id);
+
+  // hand the watch to the service worker immediately: the popup may now be closed
+  // at any moment (the user is about to open their wallet) without losing either
+  // the flip or the mint.
+  try { chrome.alarms.create("lgift-watch", { delayInMinutes: 0.5, periodInMinutes: 0.5 }); } catch { /* plain page */ }
 
   setStatus("Gift ", bold(gift.id.slice(0, 8) + "…"), " created for ",
     bold(gift.amount + " sats"), " (total ", bold(gift.amount + gift.fee + " sats"),
-    ") — ", bold("waiting for your payment"));
+    ") — ", bold("pay the invoice; the background watcher runs either way"),
+    ". The claim link appears here once it settles (click inside this popup if you return to it later) — ",
+    bold("this popup may be left open or closed; the watcher is independent of it."),
+    " ", bold("Never pay the same invoice twice."));
   $("copy-invoice").onclick = () => copy(gift.invoice, "copied-invoice");
 
-  // poll THIS gift while the popup is open; the session-hearted siblings keep polling
-  // via their own watchGift pollers (started in boot), so a second create never
-  // orphans an earlier one.
-  const deadline = Date.now() + 25_000;
-  const poll = setInterval(async () => {
-    const g = await api("GET", `/api/gifts/${gift.id}`);
-    const status = g.json?.status;
-    if (status === "UNSEEN") {
-      clearInterval(poll);
-      // Edge can freeze popup pages when they appear idle: the fetch resolution
-      // then never renders. So the mint attempt runs under a VISIBLE 15s countdown,
-      // and its result is ALSO written to storage + rendered in the Earlier-gifts
-      // row, guaranteeing a recoverable result no later than the 15s guard
-      // (v1.0.4: the 88-sat "stuck 45s+" report).
-      let secs = 15;
-      const tick = setInterval(() => {
-        setStatus("Funded — ", bold(`minting your one-time claim link… ${Math.max(secs, 0)}s`));
-        if (secs-- <= 0) clearInterval(tick);
-      }, 1000);
-      const url = await mintFor(gift.id);
-      clearInterval(tick);
-      if (url) {
-        $("claim").textContent = url;
-        show("claim-box");
-        $("copy-link").onclick = () => copy(url, "copied-link");
-        setStatus("Done — hand over the ", bold("claim link"), " below.");
-      } else {
-        // 15s came and went (or an error folded to 0): the server may ALREADY have
-        // minted. Show the persistent recoverable state instead of a spinner.
-        show("claim-box");
-        $("claim").textContent = "Your claim link couldn't be fetched right now — it is already on the server.";
-        setStatus("Paid — ", bold("result not shown yet. "), "Press ", bold("Retry mint"),
-          " below, or re-open the popup; the gift keeps its funds either way.");
-      }
-      $("create").disabled = false;
-      const preRetry = document.getElementById("claim-retry");
-      if (preRetry) preRetry.parentElement?.remove(); // remove MY retry row, keep #copy-link
-      const retry = document.createElement("button");
-      retry.id = "claim-retry";
-      retry.className = "ghost small";
-      retry.textContent = url ? "Copy link again" : "Retry mint";
-      const doneHint = document.createElement("span");
-      doneHint.className = "copied hidden";
-      doneHint.textContent = "copied ✓";
-      retry.onclick = async () => {
-        if (url) { $("claim").textContent = url; $("copy-link").onclick = () => copy(url, "copied-link"); return copy(url, doneHint); }
-        retry.disabled = true; retry.textContent = "Minting…";
-        const again = await mintFor(gift.id);
-        retry.disabled = false;
-        if (again) {
-          retry.textContent = "Copy link again";
-          $("claim").textContent = again;
-          $("copy-link").onclick = () => copy(again, "copied-link");
-          return copy(again, doneHint);
-        }
-        retry.textContent = "Failed — retry";
-      };
-      const actions = document.createElement("div");
-      actions.className = "actions";
-      actions.append(retry, doneHint);
-      $("claim-box").append(actions);
-      renderGifts(gift.id);
-    } else if (status === "UNFUNDED" && Date.now() > deadline) {
-      clearInterval(poll);
-      $("create").disabled = false;
-      setStatus("Still ", bold("UNFUNDED"), " — the invoice isn't paid yet. Check your wallet, then re-open the popup and mint once you've paid it. ",
-        bold("Never pay the same invoice twice."));
+  // disabled while THIS gift is the newest and UNFUNDED (the state you asked to gray
+  // out). It re-arms by reopen — "Check payment now" carries the payment sync, and the
+  // Earlier-gifts list keeps every previous gift visible meanwhile.
+  $("create").disabled = true;
+  currentShownId = gift.id;
+  await renderGifts(gift.id);
+
+  // a small storage tick so a payment that settles within the open window shows up
+  // quickly; freeze-safe (storage reads only).
+  const notWatch = setInterval(async () => {
+    const g = (await getGifts())[gift.id];
+    if (g && g.status === "UNSEEN") {
+      clearInterval(notWatch);
+      await showCurrentGift();
     }
   }, 2000);
-  pollers.set(gift.id, poll);
 });
 
 $("copy-invoice").onclick = () => copy($("invoice").textContent, "copied-invoice");

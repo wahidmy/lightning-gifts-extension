@@ -3,7 +3,7 @@
   "name": "Lightning Gifts — Send Bitcoin Gifts",
   "short_name": "Lightning Gifts",
   "description": "Create a bitcoin gift on lightning.gifts in one click: fund it from your own wallet and share a one-time claim link.",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "browser_specific_settings": {
     "gecko": {
       "id": "lightning-gifts@lightning.gifts",
@@ -29,6 +29,9 @@
       "128": "icons/icon128.png"
     }
   },
-  "permissions": ["storage", "clipboardWrite"],
-  "host_permissions": ["https://lightning.gifts/*"]
+  "permissions": ["storage", "clipboardWrite", "alarms", "notifications"],
+  "host_permissions": ["https://lightning.gifts/*"],
+  "background": {
+    "service_worker": "background.js"
+  }
 }
