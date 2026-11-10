@@ -110,7 +110,10 @@ def gate(zip_path, store=None):
     # reads scripts and warns that it ignores the other key). Chromium-side safety for
     # the same manifest is PROVEN by gate step 7 (unpacked load + behavioral). Any OTHER
     # warning still fails the gate.
-    if os.path.exists("/usr/bin/npx"):
+    if os.path.exists("/usr/bin/npx") and store != "edge":
+        # addons-linter is Mozilla's tool: it validates Firefox compatibility and will
+        # demand the background.scripts fallback that Edge's validator FORBIDS. Run it
+        # on the cws/amo zips only; Edge's authority is Partner Center's own validation.
         r = subprocess.run(["npx", "-y", "addons-linter", zip_path], capture_output=True, text=True, timeout=240)
         summary = re.search(r"errors\s+(\d+).*?notices\s+(\d+).*?warnings\s+(\d+)", r.stdout, re.S)
         codes = set(re.findall(r"^([A-Z][A-Z_]{3,})\s", r.stdout, re.M))
