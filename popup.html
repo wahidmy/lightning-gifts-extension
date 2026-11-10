@@ -108,8 +108,10 @@
     <p class="hint">Lightning Gifts is not a wallet, an exchange, or a bank: gift sats sit with the service only between funding and the recipient's withdrawal. The key travels only to lightning.gifts, in an Authorization header — never in a URL, a log, or a share sheet.</p>
   </section>
 
-  <!-- has key: create -->
-  <section id="create" class="hidden">
+  <!-- create screen: id must differ from the #create button below — a duplicate id
+       used to bind the click handler to the whole section (every click in the form
+       fired a new POST /api/gifts). See lngift-browser-extensions skill, DOM-id rule. -->
+  <section id="create-screen" class="hidden">
     <label for="amount">Gift amount (sats)</label>
     <input id="amount" type="number" min="1" step="1" placeholder="1000" />
     <div class="fee" id="fee-line">Fee ≈ 100 sats on small gifts; total invoiced = amount + fee.</div>

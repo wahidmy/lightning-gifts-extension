@@ -86,8 +86,8 @@ async function copy(text, doneId) {
 // --- setup vs create screen ---
 async function boot() {
   const { key } = await storage.get(["key"]);
-  if (!key) { show("setup"); show("create", false); return; }
-  show("setup", false); show("create");
+  if (!key) { show("setup"); show("create-screen", false); return; }
+  show("setup", false); show("create-screen");
 }
 
 $("save-key").addEventListener("click", async () => {
