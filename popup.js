@@ -246,14 +246,14 @@ async function showCurrentGift() {
   } else if (g.status === "UNSEEN") {
     setStatus("Paid — ", bold("the service worker is minting your link"), "; it appears here (and as a notification) within a minute.");
     $("create").disabled = false;
-    ensureCheckPaymentButton(g.id, "Paid — waiting for the link… press Check payment now to fetch it immediately.");
+    ensureCheckPaymentButton(g.id, "Paid — waiting for the link… press Check payment now (below) to fetch it immediately.");
   } else if (g.status === "UNFUNDED") {
     // the one state where the button re-arms by DESIGN: the user may want another gift
     // while the first sits unfunded (it stays listed in Earlier gifts, and the SW keeps
     // watching it) — with an explicit "Check payment now" rescue button.
     $("create").disabled = false;
     setStatus("Gift ", bold((g.id || "").slice(0, 8) + "…"), " still ", bold("UNFUNDED"),
-      " — the background watcher checks every 30s; press ", bold("Check payment now"),
+      " — the background watcher checks every 30s; press ", bold("Check payment now (below)"),
       " after you've paid. ", bold("Never pay the same invoice twice."));
     ensureCheckPaymentButton(g.id);
   }
@@ -269,7 +269,7 @@ function currentShownClearButtons() {
 }
 
 // explicit user-gesture rescue: checks the flip and mints on the spot
-function ensureCheckPaymentButton(giftId, heading = "Not paid yet — after you've paid, press Check payment now.") {
+function ensureCheckPaymentButton(giftId, heading = "Not paid yet — after you've paid, press Check payment now (below).") {
   const box = $("link-box");
   if (document.getElementById("claim-retry")) return;
   show("link-box");
