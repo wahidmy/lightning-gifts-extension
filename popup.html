@@ -83,6 +83,15 @@
     .hidden { display: none; }
     a { color: var(--accent); }
     .copied { color: var(--ok); font-size: 11px; }
+    .gift-row { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+    .gift-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .gift-meta { color: var(--muted); font-size: 11px; }
+    .gift-current { color: var(--muted); font-size: 11px; }
+    .gift-body { margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .gift-body > span { font-size: 11px; color: var(--muted); }
+    .gift-link { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; flex: 1; }
+    .chip { display: inline-block; padding: 1px 6px; border-radius: 999px; background: var(--line); color: var(--ink); font-size: 10px; font-weight: 700; }
+    .gift-row .ghost.small { padding: 3px 8px; font-size: 11px; width: auto; margin: 0; }
     footer { margin-top: 12px; font-size: 10px; color: var(--muted); }
   </style>
 </head>
@@ -157,7 +166,14 @@
     </div>
 
     <p class="hint">The link <strong>is</strong> the gift: single-use and time-limited. Send it over a channel you trust with the recipient, and never paste it into public pages.</p>
-    <footer>Operator-published · data goes only to lightning.gifts · <a href="https://lightning.gifts/privacy" target="_blank" rel="noreferrer">privacy</a></footer>
+    <!-- session gifts: everything this popup created, persisted so payments and
+       mints survive closing the popup or creating another gift (v1.0.2) -->
+  <section id="gifts-section" class="hidden" style="margin-top: 12px;">
+    <div class="lbl">Earlier gifts from this popup</div>
+    <div id="gifts-list"></div>
+  </section>
+
+  <footer>Operator-published · data goes only to lightning.gifts · <a href="https://lightning.gifts/privacy" target="_blank" rel="noreferrer">privacy</a></footer>
   </section>
 
   <script src="popup.js"></script>

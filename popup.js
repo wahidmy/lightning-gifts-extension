@@ -77,10 +77,166 @@ async function api(method, path, body) {
   return { status: res.status, json, text };
 }
 
-async function copy(text, doneId) {
+async function copy(text, done) {
   await navigator.clipboard.writeText(text);
-  show(doneId);
-  setTimeout(() => show(doneId, false), 2400);
+  // `done` is either a DOM element id ("copied-invoice") or an element itself
+  const el = typeof done === "string" ? document.getElementById(done) : done;
+  if (el) el.classList.remove("hidden");
+  setTimeout(() => el && el.classList.add("hidden"), 2400);
+}
+
+// ---------------------------------------------------------------------------
+// session gifts — every gift this popup created, persisted so a payment or a
+// claim-link mint is never lost to a popup close or a second create.
+// v1.0.0/1.0.1 stored NOTHING: closing the popup mid-mint stranded the user at
+// "Funded — minting…" forever even though the service had minted the claim token
+// (incident 2026-11-10: the 133-sat gift). Store everything; heal on boot.
+// One key ("gifts") holds the whole map — works with both storage backends above.
+// ---------------------------------------------------------------------------
+const GIFT_TTL_MS = 7 * 864e5; // prune session records after a week
+
+async function upsertGift(id, patch) {
+  const { gifts } = await storage.get(["gifts"]);
+  const next = Object.assign({}, gifts, { [id]: Object.assign({}, gifts?.[id], patch) });
+  await storage.set({ gifts: next });
+  return next[id];
+}
+
+async function getGifts() {
+  const { gifts } = await storage.get(["gifts"]);
+  const now = Date.now();
+  return Object.fromEntries(Object.entries(gifts ?? {}).filter(([, g]) =>
+    (now - Date.parse(g.createdAt || 0)) < GIFT_TTL_MS));
+}
+
+const STATUS_CHIP = {
+  UNFUNDED: "waiting for payment",
+  UNSEEN: "paid — link ready",
+  SEEN: "seen by recipient",
+  CLAIMED: "claimed",
+  WITHDRAWN: "withdrawn",
+  EXPIRED: "expired",
+  DELETED: "deleted",
+};
+
+// per-gift pollers: every UNFUNDED session gift is watched in parallel (2s), so
+// create-A -> pay-A -> create-B never orphans A's status. Each gift polls at most
+// 45 reads (~90s) — matches the service's "one LNbits read per second per open
+// UNFUNDED gift page is fine at this scale" cost rationale.
+const pollers = new Map();
+
+function watchGift(id) {
+  if (pollers.has(id)) return;
+  const started = Date.now();
+  const t = setInterval(async () => {
+    if (Date.now() - started > 90_000) {
+      clearInterval(t); pollers.delete(id);
+      renderGifts();
+      return;
+    }
+    const g = await api("GET", `/api/gifts/${id}`);
+    const status = g.json?.status;
+    if (!status) return;
+    const prev = (await getGifts())[id];
+    if (prev && prev.status === status) return;
+    await upsertGift(id, { status });
+    if (status === "UNSEEN") {
+      clearInterval(t); pollers.delete(id);
+      await mintFor(id);
+    } else if (status !== "UNFUNDED") {
+      clearInterval(t); pollers.delete(id);
+    }
+    renderGifts();
+  }, 2000);
+  pollers.set(id, t);
+}
+
+async function mintFor(id) {
+  const g = (await getGifts())[id];
+  if (g?.claimUrl) return g.claimUrl;
+  const mint = await api("POST", `/api/gifts/${id}/claimToken`, {});
+  if (mint.status === 200 && mint.json?.claimUrl) {
+    await upsertGift(id, { claimUrl: mint.json.claimUrl, mintedAt: new Date().toISOString() });
+    return mint.json.claimUrl;
+  }
+  return null;
+}
+
+// row builder — DOM only (no innerHTML), textContent for anything API-fed
+function giftRow(g, isCurrent) {
+  const row = document.createElement("div");
+  row.className = "gift-row";
+
+  const head = document.createElement("div");
+  head.className = "gift-head";
+  const chip = document.createElement("span");
+  chip.className = "chip";
+  chip.textContent = STATUS_CHIP[g.status] ?? g.status;
+  const meta = document.createElement("span");
+  meta.className = "gift-meta";
+  meta.textContent = `${g.amount} sats · ${String(g.createdAt).slice(0, 16).replace("T", " ")}Z` +
+    (g.note ? ` · "${g.note}"` : "");
+  head.append(chip, meta);
+
+  const body = document.createElement("div");
+  body.className = "gift-body";
+  if (isCurrent) {
+    const cur = document.createElement("span");
+    cur.className = "gift-current";
+    cur.textContent = "shown above";
+    body.append(cur);
+    row.append(head, body);
+    return row;
+  }
+  if (g.status === "UNSEEN") {
+    if (g.claimUrl) {
+      const link = document.createElement("div");
+      link.className = "gift-link";
+      link.textContent = g.claimUrl;
+      const btn = document.createElement("button");
+      btn.className = "ghost small";
+      btn.textContent = "Copy link";
+      const done = document.createElement("span");
+      done.className = "copied hidden";
+      done.textContent = "copied ✓";
+      btn.onclick = () => copy(g.claimUrl, done);
+      body.append(link, btn, done);
+    } else {
+      const note = document.createElement("span");
+      note.textContent = "paid — minting next time you open this popup, or now:";
+      body.append(note);
+      const retry = document.createElement("button");
+      retry.className = "ghost small";
+      retry.textContent = "Mint link now";
+      retry.onclick = async () => {
+        retry.disabled = true;
+        const url = await mintFor(g.id);
+        retry.textContent = url ? "minted ✓" : "failed — reopen later";
+        retry.disabled = false;
+        renderGifts();
+      };
+      body.append(retry);
+    }
+  } else if (g.status === "UNFUNDED") {
+    const note = document.createElement("span");
+    note.textContent = "invoice unpaid — the link is minted the moment the payment settles";
+    body.append(note);
+  } else {
+    const note = document.createElement("span");
+    note.textContent = "single-use link no longer minted";
+    body.append(note);
+  }
+  row.append(head, body);
+  return row;
+}
+
+async function renderGifts(currentId) {
+  const map = await getGifts();
+  const entries = Object.values(map).filter((g) => g.id && g.status)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  const others = entries.filter((g) => g.id !== currentId);
+  $("gifts-list").replaceChildren(...others.map((g) => giftRow(g, false)));
+  show("gifts-section", others.length > 0);
 }
 
 // --- setup vs create screen ---
@@ -88,6 +244,12 @@ async function boot() {
   const { key } = await storage.get(["key"]);
   if (!key) { show("setup"); show("create-screen", false); return; }
   show("setup", false); show("create-screen");
+  await renderGifts();
+  for (const g of Object.values(await getGifts())) {
+    if (g.status === "UNFUNDED") watchGift(g.id);
+    if (g.status === "UNSEEN" && !g.claimUrl) await mintFor(g.id);
+  }
+  await renderGifts();
 }
 
 $("save-key").addEventListener("click", async () => {
@@ -114,6 +276,7 @@ $("create").addEventListener("click", async () => {
     return;
   }
 
+  const note = ($("note").value || "").trim();
   const body = {
     amount,                                  // sats, always — currency below is display metadata
     currency: "USD",
@@ -124,7 +287,6 @@ $("create").addEventListener("click", async () => {
     generatePassphrase: false,               // the claim link is the handoff; /redeem passphrases stay for humans
     passphraseLength: 4,
   };
-  const note = ($("note").value || "").trim();
   if (note) body.note = note;
 
   $("create").disabled = true;
@@ -142,12 +304,28 @@ $("create").addEventListener("click", async () => {
   const gift = created.json;
   $("invoice").textContent = gift.invoice;
   show("invoice-box");
+
+  await upsertGift(gift.id, {
+    id: gift.id,
+    amount: gift.amount,
+    fee: gift.fee,
+    invoice: gift.invoice,
+    note,
+    flow: body.onboardingFlow,
+    createdAt: new Date(gift.created ?? Date.now()).toISOString(),
+    status: "UNFUNDED",
+    claimUrl: null,
+  });
+  await renderGifts(gift.id);
+
   setStatus("Gift ", bold(gift.id.slice(0, 8) + "…"), " created for ",
     bold(gift.amount + " sats"), " (total ", bold(gift.amount + gift.fee + " sats"),
     ") — ", bold("waiting for your payment"));
   $("copy-invoice").onclick = () => copy(gift.invoice, "copied-invoice");
 
-  // poll while the popup is open: UNFUNDED -> UNSEEN happens when LNbits settles
+  // poll THIS gift while the popup is open; the session-hearted siblings keep polling
+  // via their own watchGift pollers (started in boot), so a second create never
+  // orphans an earlier one.
   const deadline = Date.now() + 25_000;
   const poll = setInterval(async () => {
     const g = await api("GET", `/api/gifts/${gift.id}`);
@@ -155,17 +333,18 @@ $("create").addEventListener("click", async () => {
     if (status === "UNSEEN") {
       clearInterval(poll);
       setStatus("Funded — ", bold("minting your one-time claim link…"));
-      const mint = await api("POST", `/api/gifts/${gift.id}/claimToken`, {});
       $("create").disabled = false;
-      if (mint.status === 200 && mint.json?.claimUrl) {
-        $("claim").textContent = mint.json.claimUrl;
+      const url = await mintFor(gift.id);
+      if (url) {
+        $("claim").textContent = url;
         show("claim-box");
-        $("copy-link").onclick = () => copy(mint.json.claimUrl, "copied-link");
+        $("copy-link").onclick = () => copy(url, "copied-link");
         setStatus("Done — hand over the ", bold("claim link"), " below.");
       } else {
-        setStatus("Funded — but minting failed (HTTP ", String(mint.status),
-          "). Re-open the popup to mint again; the gift exists.");
+        setStatus("Funded — but the mint didn't come back. ", bold("Re-open the popup"),
+          " — it will finish automatically; the gift keeps its funds.");
       }
+      renderGifts(gift.id);
     } else if (status === "UNFUNDED" && Date.now() > deadline) {
       clearInterval(poll);
       $("create").disabled = false;
@@ -173,9 +352,8 @@ $("create").addEventListener("click", async () => {
         bold("Never pay the same invoice twice."));
     }
   }, 2000);
+  pollers.set(gift.id, poll);
 });
-
-function totalStr(gift) { return `${gift.amount + gift.fee} sats`; }
 
 $("copy-invoice").onclick = () => copy($("invoice").textContent, "copied-invoice");
 $("copy-link").onclick = () => copy($("claim").textContent, "copied-link");
