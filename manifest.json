@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Lightning Gifts — Send Bitcoin Gifts",
   "short_name": "Lightning Gifts",
-  "description": "Create a bitcoin gift on lightning.gifts in one click: fund it from your own wallet and share a one-time claim link. Operator-published.",
+  "description": "Create a bitcoin gift on lightning.gifts in one click: fund it from your own wallet and share a one-time claim link.",
   "version": "1.0.0",
   "icons": {
     "16": "icons/icon16.png",
