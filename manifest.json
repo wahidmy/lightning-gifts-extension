@@ -32,6 +32,7 @@
   "permissions": ["storage", "clipboardWrite", "alarms", "notifications"],
   "host_permissions": ["https://lightning.gifts/*"],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "scripts": ["background.js"]
   }
 }
