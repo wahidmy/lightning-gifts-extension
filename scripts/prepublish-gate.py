@@ -43,7 +43,7 @@ def skip_note(name, why):
     skipped.append(name)
 
 
-def gate(zip_path):
+def gate(zip_path, store=None):
     key = os.environ.get("LIGHTNING_GIFTS_API_KEY", "")
     REPO = os.path.dirname(os.path.abspath(__file__)) + "/.."
 
@@ -63,6 +63,19 @@ def gate(zip_path):
     check("manifest description <=132", len(m["description"]) <= 132, f"{len(m['description'])}")
     check("manifest version sane", re.fullmatch(r"\d+(\.\d+){0,3}", m["version"]) is not None, m["version"])
     check("host_permissions pinned to origin", m["host_permissions"] == ["https://lightning.gifts/*"])
+
+    # store-specific validator rules (Edge Partner Center is the strictest):
+    # - Edge rejects background.scripts outright under MV3 and enforces short_name <= 12.
+    # - Chrome/Firefox tolerate both; their zips keep the dual background manifest.
+    if store == "edge":
+        check("edge: background is service_worker ONLY (no scripts key)",
+              m.get("background") == {"service_worker": "background.js"}, str(m.get("background")))
+        sn = m.get("short_name")
+        check("edge: short_name <= 12 chars", sn is not None and len(sn) <= 12, f"{sn!r} ({len(sn or '')})")
+    if store in ("cws", "amo"):
+        check(f"{store}: dual background manifest (SW + Firefox scripts fallback)",
+              m.get("background") == {"service_worker": "background.js", "scripts": ["background.js"]},
+              str(m.get("background")))
 
     # 3. duplicate ids (the getElementById first-match trap)
     html = raw["popup.html"].decode()
@@ -278,7 +291,11 @@ if __name__ == "__main__":
     if "--behavioral-only" in sys.argv:
         behavioral(sys.argv[-1], os.environ["LIGHTNING_GIFTS_API_KEY"])
         sys.exit(0)
+    store = None
+    if "--store" in sys.argv:
+        store = sys.argv[sys.argv.index("--store") + 1]
+        sys.argv = sys.argv[:sys.argv.index("--store")] + sys.argv[sys.argv.index("--store") + 2:]
     if len(sys.argv) != 2 or not os.path.exists(sys.argv[1]):
         print(__doc__)
         sys.exit(2)
-    sys.exit(gate(sys.argv[1]))
+    sys.exit(gate(sys.argv[1], store=store))
