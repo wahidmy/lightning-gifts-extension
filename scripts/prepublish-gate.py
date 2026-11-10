@@ -79,12 +79,22 @@ def gate(zip_path):
     r = subprocess.run(["node", "--check", tpath], capture_output=True, text=True)
     check("popup.js parses (node --check)", r.returncode == 0, r.stderr.strip()[:80])
 
-    # 5. addons-linter
+    # 5. addons-linter — 0 errors, 0 notices, 0 warnings EXCEPT the single documented
+    # Firefox-side informational code: BACKGROUND_SERVICE_WORKER_IGNORED is inherent to
+    # the cross-browser dual background manifest (Chromium reads service_worker; Firefox
+    # reads scripts and warns that it ignores the other key). Chromium-side safety for
+    # the same manifest is PROVEN by gate step 7 (unpacked load + behavioral). Any OTHER
+    # warning still fails the gate.
     if os.path.exists("/usr/bin/npx"):
         r = subprocess.run(["npx", "-y", "addons-linter", zip_path], capture_output=True, text=True, timeout=240)
         summary = re.search(r"errors\s+(\d+).*?notices\s+(\d+).*?warnings\s+(\d+)", r.stdout, re.S)
-        check("addons-linter 0/0/0", bool(summary) and all(int(g) == 0 for g in summary.groups()),
-              (r.stdout[-400:] if not summary or any(int(g) for g in summary.groups()) else ""))
+        codes = set(re.findall(r"^([A-Z][A-Z_]{3,})\s", r.stdout, re.M))
+        tolerated = {"BACKGROUND_SERVICE_WORKER_IGNORED"}
+        counts = [int(g) for g in summary.groups()] if summary else [9, 9, 9]
+        block = any(codes - tolerated) or counts[0] > 0 or counts[1] > 0 or (counts[2] > len(codes & tolerated))
+        check("addons-linter 0/0 (+documented Firefox SW informational only)",
+              bool(summary) and not block,
+              (r.stdout[-400:] if not summary or block else f"tolerated={sorted(codes & tolerated)}"))
     else:
         skip_note("addons-linter", "npx unavailable")
 
